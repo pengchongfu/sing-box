@@ -55,6 +55,27 @@ type Server struct {
 	externalUIDownloadDetour string
 }
 
+type FallbackResponseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *FallbackResponseWriter) Write(bytelist []byte) (int, error) {
+	if w.status == http.StatusNotFound {
+		return len(bytelist), nil
+	}
+	return w.ResponseWriter.Write(bytelist)
+}
+
+func (w *FallbackResponseWriter) WriteHeader(status int) {
+	w.status = status
+
+	if w.status == http.StatusNotFound {
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
 func NewServer(ctx context.Context, router adapter.Router, logFactory log.ObservableFactory, options option.ClashAPIOptions) (adapter.ClashServer, error) {
 	trafficManager := trafficontrol.NewManager()
 	chiRouter := chi.NewRouter()
@@ -121,7 +142,13 @@ func NewServer(ctx context.Context, router adapter.Router, logFactory log.Observ
 			fs := http.StripPrefix("/ui", http.FileServer(http.Dir(server.externalUI)))
 			r.Get("/ui", http.RedirectHandler("/ui/", http.StatusTemporaryRedirect).ServeHTTP)
 			r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
-				fs.ServeHTTP(w, r)
+				fallbackWriter := &FallbackResponseWriter{ResponseWriter: w}
+				fs.ServeHTTP(fallbackWriter, r)
+
+				if fallbackWriter.status == http.StatusNotFound {
+					w.Header().Del("Content-Type")
+					http.ServeFile(w, r, server.externalUI)
+				}
 			})
 		})
 	}
